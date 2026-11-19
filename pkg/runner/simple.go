@@ -139,17 +139,38 @@ func NewSimpleRunner(conf *ffuf.Config, replay bool) ffuf.RunnerProvider {
 func (r *SimpleRunner) Prepare(input map[string][]byte, basereq *ffuf.Request) (ffuf.Request, error) {
 	req := ffuf.CopyRequest(basereq)
 
-	for keyword, inputitem := range input {
-		req.Method = strings.ReplaceAll(req.Method, keyword, string(inputitem))
-		headers := make(map[string]string, len(req.Headers))
-		for h, v := range req.Headers {
-			var CanonicalHeader string = textproto.CanonicalMIMEHeaderKey(strings.ReplaceAll(h, keyword, string(inputitem)))
-			headers[CanonicalHeader] = strings.ReplaceAll(v, keyword, string(inputitem))
-		}
-		req.Headers = headers
-		req.Url = strings.ReplaceAll(req.Url, keyword, string(inputitem))
-		req.Data = []byte(strings.ReplaceAll(string(req.Data), keyword, string(inputitem)))
+	// One deterministic, single-pass replacer for every keyword in this input
+	// set. The old loop ran strings.ReplaceAll once per keyword while ranging
+	// over a map (random iteration order), which made request construction
+	// nondeterministic in two ways: the keyword order drifted between runs, and
+	// a payload value that literally contained another keyword's name was
+	// rescanned and replaced a second time, so the same input produced two
+	// different URLs in drifting proportions. The replacer resolves both: it
+	// takes every pair in one simultaneous pass (a replaced value is never
+	// rescanned, so payloads keep their literal form) and its result is
+	// independent of map iteration order. The same instance is applied to all
+	// four surfaces, so Method, headers (name and value), Url and Data share one
+	// replacement semantics.
+	rep := inputReplacer(input)
+
+	req.Method = rep.Replace(req.Method)
+	headers := make(map[string]string, len(req.Headers))
+	headerKeys := make([]string, 0, len(req.Headers))
+	for h := range req.Headers {
+		headerKeys = append(headerKeys, h)
 	}
+	// Rebuild the header map in a fixed order as well. Two distinct template
+	// headers that canonicalize to the same key after substitution must collide
+	// deterministically; ranging the source map would let the survivor drift.
+	sort.Strings(headerKeys)
+	for _, h := range headerKeys {
+		v := req.Headers[h]
+		canonicalHeader := textproto.CanonicalMIMEHeaderKey(rep.Replace(h))
+		headers[canonicalHeader] = rep.Replace(v)
+	}
+	req.Headers = headers
+	req.Url = rep.Replace(req.Url)
+	req.Data = []byte(rep.Replace(string(req.Data)))
 
 	req.Input = input
 	return req, nil
@@ -555,28 +576,46 @@ func (r *SimpleRunner) runPreflightChain(chain []ffuf.PreflightConfig, inheritVa
 	return vars, nil
 }
 
-// varsReplacer builds one deterministic replacer for the extracted vars. Names
-// are applied longest-first (then lexicographically) so a shorter name that is a
-// prefix of a longer one can't win, and strings.Replacer does a single
-// simultaneous pass, so a replaced value is never rescanned. That makes
-// substitution independent of map iteration order and free of value-contains-name
-// cascades.
-func varsReplacer(vars map[string]string) *strings.Replacer {
-	names := make([]string, 0, len(vars))
-	for k := range vars {
-		names = append(names, k)
-	}
-	sort.Slice(names, func(i, j int) bool {
-		if len(names[i]) != len(names[j]) {
-			return len(names[i]) > len(names[j])
+// deterministicReplacer builds one strings.Replacer from ordered keyword/value
+// pairs. Names are applied longest-first (then lexicographically) so a shorter
+// name that is a prefix of a longer one can never win, and strings.Replacer
+// does a single simultaneous pass, so a replaced value is never rescanned.
+// That makes substitution independent of map iteration order and free of
+// value-contains-name cascades for any replacement path that builds its
+// replacer here.
+func deterministicReplacer(pairs [][2]string) *strings.Replacer {
+	sort.Slice(pairs, func(i, j int) bool {
+		if len(pairs[i][0]) != len(pairs[j][0]) {
+			return len(pairs[i][0]) > len(pairs[j][0])
 		}
-		return names[i] < names[j]
+		return pairs[i][0] < pairs[j][0]
 	})
-	pairs := make([]string, 0, len(vars)*2)
-	for _, n := range names {
-		pairs = append(pairs, n, vars[n])
+	flat := make([]string, 0, len(pairs)*2)
+	for _, p := range pairs {
+		flat = append(flat, p[0], p[1])
 	}
-	return strings.NewReplacer(pairs...)
+	return strings.NewReplacer(flat...)
+}
+
+// varsReplacer builds one deterministic replacer for the extracted vars.
+func varsReplacer(vars map[string]string) *strings.Replacer {
+	pairs := make([][2]string, 0, len(vars))
+	for k, v := range vars {
+		pairs = append(pairs, [2]string{k, v})
+	}
+	return deterministicReplacer(pairs)
+}
+
+// inputReplacer builds the deterministic single-pass replacer used by Prepare
+// for one request's fuzz keywords. The input map is keyed by keyword name, so
+// each name reaches the replacer exactly once even if two providers share a
+// name; values are copied to strings before the map is dropped.
+func inputReplacer(input map[string][]byte) *strings.Replacer {
+	pairs := make([][2]string, 0, len(input))
+	for k, v := range input {
+		pairs = append(pairs, [2]string{k, string(v)})
+	}
+	return deterministicReplacer(pairs)
 }
 
 // hostOf returns the authority (host[:port]) of a URL, or "" if it cannot be parsed.

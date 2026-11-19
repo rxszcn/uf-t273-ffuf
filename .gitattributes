@@ -1,0 +1,7 @@
+# Golden characterization files are compared byte-for-byte against strings the
+# Go program emits at runtime, and the runtime always writes LF. On a checkout
+# with core.autocrlf=true (the Windows default) the working-tree copies would
+# otherwise be converted to CRLF, making TestCharacterization_HelpGolden fail
+# for a reason unrelated to any code change. Pin the goldens to LF in every
+# working tree so the comparison is platform-independent.
+testdata/*.golden eol=lf

@@ -9,6 +9,7 @@ A fast web fuzzer written in Go.
     - [Vhost discovery](https://github.com/ffuf/ffuf#virtual-host-discovery-without-dns-records)
     - [Parameter fuzzing](https://github.com/ffuf/ffuf#get-parameter-fuzzing)
     - [POST data fuzzing](https://github.com/ffuf/ffuf#post-data-fuzzing)
+    - [Multi-wordlist substitution](https://github.com/ffuf/ffuf#multi-wordlist-substitution)
     - [Using external mutator](https://github.com/ffuf/ffuf#using-external-mutator-to-produce-test-cases)
     - [Configuration files](https://github.com/ffuf/ffuf#configuration-files)
 - [Help](https://github.com/ffuf/ffuf#usage)
@@ -92,6 +93,21 @@ This is a very straightforward operation, again by using the `FUZZ` keyword. Thi
 ffuf -w /path/to/postdata.txt -X POST -d "username=admin\&password=FUZZ" -u https://target/login.php -fc 401
 ```
 
+### Multi-wordlist substitution
+
+A wordlist can bind its own keyword with `-w /path/to/wordlist:KEYWORD`, so a single request can carry several keywords at once, for example:
+
+```
+ffuf -w params.txt:PARAM -w values.txt:VAL -u https://example.org/?PARAM=VAL -mode pitchfork
+```
+
+All keywords of one request are substituted in **one deterministic, single pass**, with the same semantics on every surface the keyword may appear in: the URL (`-u`), the request method (`-X`), header names and header values (`-H`), and the POST body (`-d`). Two rules follow from this:
+
+- **A substituted payload is never rescanned.** If a payload value literally contains another keyword's name, that text is kept verbatim and is not replaced a second time. For example, with keywords `FUZZ` (value `W2-x`) and `W2` (value `second`), the template `https://target/a/FUZZ/b/W2` always becomes `https://target/a/W2-x/b/second` — the `W2` inside the `FUZZ` payload survives, and only the standalone `W2` marker is replaced.
+- **Construction does not depend on keyword order.** When two keyword names overlap (one is a prefix of the other), the longest matching name wins at every position, and keywords of equal length are ordered lexicographically. Repeating the same input therefore always constructs the identical request, which is what request auditing and forensic replay rely on.
+
+This replaces the earlier behavior of applying one `ReplaceAll` per keyword while iterating the keyword map: that order was randomized, and a payload containing another keyword's name could be swallowed by a second replacement, so the same input produced two different requests in drifting proportions.
+
 ### Maximum execution time
 
 If you don't want ffuf to run indefinitely, you can use the `-maxtime`. This stops __the entire__ process after a given time (in seconds).
@@ -154,7 +170,7 @@ parameter.
 
 ## Usage
 
-To define the test case for ffuf, use the keyword `FUZZ` anywhere in the URL (`-u`), headers (`-H`), or POST data (`-d`).
+To define the test case for ffuf, use the keyword `FUZZ` anywhere in the URL (`-u`), the request method (`-X`), headers (`-H`, in both the header name and the header value), or POST data (`-d`). Every keyword is substituted in a single deterministic pass, described under [Multi-wordlist substitution](#multi-wordlist-substitution) below.
 
 ```
 Fuzz Faster U Fool - v2.1.0
